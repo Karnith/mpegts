@@ -405,8 +405,8 @@ jBinary.loadData('sample.ts', function (err, data) {
 																stream_type: 'audio',
 																upstream_flag: 0,
 																buffer_size: 0,
-																maxBitrate: maxAudioSize / (duration / 90000 / audioSizes.length),
-																avgBitrate: (stream.tell() - audioStart) / (duration / 90000)
+																maxBitrate: Math.round(maxAudioSize / (duration / 90000 / audioSizes.length)),
+																avgBitrate: Math.round((stream.tell() - audioStart) / (duration / 90000))
 															},
 															{
 																descriptor_type: 5,
@@ -432,7 +432,7 @@ jBinary.loadData('sample.ts', function (err, data) {
 											flags: 0,
 											entries: [{
 												sample_count: audioSizes.length,
-												sample_delta: duration / audioSizes.length
+												sample_delta: Math.round(duration / audioSizes.length)
 											}]
 										}],
 										stsc: [{
@@ -466,6 +466,8 @@ jBinary.loadData('sample.ts', function (err, data) {
 		});
 	};
 	
+	var creationTime = new Date();
+
 	file.write('File', {
 		ftyp: [{
 			major_brand: 'isom',
@@ -480,6 +482,8 @@ jBinary.loadData('sample.ts', function (err, data) {
 				mvhd: [{
 					version: 0,
 					flags: 0,
+					creation_time: creationTime,
+					modification_time: creationTime,
 					timescale: 90000,
 					duration: duration,
 					rate: 1,
