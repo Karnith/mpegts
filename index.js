@@ -4,10 +4,18 @@ Error.stackTraceLimit = Infinity;
 
 var prevPrepareStackTrace = Error.prepareStackTrace;
 Error.prepareStackTrace = function (error, frames) {
-	var firstFrames = frames.slice(0, 2);
-	var lastFrames = frames.slice(frames.length - 2);
-	frames = frames.filter(function (frame) { return 'displayName' in frame.getFunction() });
-	return prevPrepareStackTrace(error, firstFrames.concat(frames).concat(lastFrames));
+	var firstNonNamedIndex = 0;
+
+	var filteredFrames = frames.filter(function (frame, index) {
+		if ('displayName' in frame.getFunction()) {
+			firstNonNamedIndex = index + 1;
+			return true;
+		} else {
+			return false;
+		}
+	});
+
+	return prevPrepareStackTrace(error, filteredFrames.concat(frames.slice(firstNonNamedIndex)));
 };
 
 var jBinary = require('jbinary');
