@@ -1,5 +1,15 @@
 require('stack-displayname');
 
+Error.stackTraceLimit = Infinity;
+
+var prevPrepareStackTrace = Error.prepareStackTrace;
+Error.prepareStackTrace = function (error, frames) {
+	var firstFrames = frames.slice(0, 2);
+	var lastFrames = frames.slice(frames.length - 2);
+	frames = frames.filter(function (frame) { return 'displayName' in frame.getFunction() });
+	return prevPrepareStackTrace(error, firstFrames.concat(frames).concat(lastFrames));
+};
+
 var jBinary = require('jbinary');
 var jDataView = require('jdataview');
 var ADTS = require('./mpegts-to-mp4/adts');
