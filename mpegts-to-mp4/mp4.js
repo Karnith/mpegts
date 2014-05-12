@@ -1,5 +1,4 @@
-(function () {
-
+var jBinary = require('jbinary');
 var timeBasis = new Date(1970, 0, 1) - new Date(1904, 0, 1);
 
 function atomFilter(type) {
@@ -8,7 +7,7 @@ function atomFilter(type) {
 	};
 }
 
-this.MP4 = {
+module.exports = {
 	ShortName: ['string0', 4],
 	
 	Rate: ['FixedPoint', 'int32', 16],
@@ -735,5 +734,3 @@ this.MP4 = {
 
 	File: ['Atoms', function () { return this.binary.view.byteLength }]
 };
-
-}).call(this);

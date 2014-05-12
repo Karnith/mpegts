@@ -1,4 +1,6 @@
-this.MPEGTS = {
+var jBinary = require('jbinary');
+
+module.exports = {
 	PCR: {
 		pts: 33,
 		_reserved: 6,

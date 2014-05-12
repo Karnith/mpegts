@@ -1,4 +1,6 @@
-this.H264 = {
+var jBinary = require('jbinary');
+
+module.exports = {
 	ExpGolomb: jBinary.Type({
 		params: ['isSigned'],
 		read: function () {

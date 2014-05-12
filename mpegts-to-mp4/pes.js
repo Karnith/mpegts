@@ -1,4 +1,6 @@
-this.PES = {
+var jBinary = require('jbinary');
+
+module.exports = {
 	Flag: jBinary.Template({
 		baseType: 1,
 		params: ['dependentField'],

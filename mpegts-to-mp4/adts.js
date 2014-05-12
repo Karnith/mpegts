@@ -1,4 +1,4 @@
-this.ADTS = {
+module.exports = {
 	ADTSPacket: {
 		_start: function () { return this.binary.tell() },
 		_syncWord: ['const', 12, 0xfff, true],

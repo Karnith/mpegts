@@ -1,145 +1,481 @@
-(function () {
-	// requestAnimationFrame polyfill
-	window.requestAnimationFrame = window.requestAnimationFrame || window.mozRequestAnimationFrame || window.webkitRequestAnimationFrame || window.msRequestAnimationFrame || setTimeout;
+require('stack-displayname');
 
-	// preconfiguration using <script>'s data-attributes values
-	var scripts = document.getElementsByTagName('script'),
-		script = scripts[scripts.length - 1],
-		worker = new Worker('mpegts-to-mp4/worker.js'),
-		nextIndex = 0,
-		sentVideos = 0,
-		currentVideo = null,
-		videos = [],
-		lastOriginal,
-		canvas = document.getElementById(script.getAttribute('data-canvas')),
-		manifest = script.getAttribute('data-hls'),
-		context = canvas.getContext('2d');
+var jBinary = require('jbinary');
+var jDataView = require('jdataview');
+var ADTS = require('./mpegts-to-mp4/adts');
+var H264 = require('./mpegts-to-mp4/h264');
+var MP4 = require('./mpegts-to-mp4/mp4');
+var MPEGTS = require('./mpegts-to-mp4/mpegts');
+var PES = require('./mpegts-to-mp4/pes');
 
-	// drawing new frame
-	function nextFrame() {
-		if (currentVideo.paused || currentVideo.ended) {
-			return;
+jBinary.loadData('sample.ts', function (err, data) {
+	var mpegts = new jBinary(data, MPEGTS);
+
+	console.time('convert');
+
+	var packets = mpegts.read('File');
+	
+	// extracting and concatenating raw stream parts
+	var stream = new jDataView(mpegts.view.byteLength);
+	for (var i = 0, length = packets.length; i < length; i++) {
+		var packet = packets[i], adaptation = packet.adaptationField, payload = packet.payload;
+		if (payload && payload._rawStream) {
+			stream.writeBytes(payload._rawStream);
 		}
-		context.drawImage(currentVideo, 0, 0);
-		requestAnimationFrame(nextFrame);
 	}
-
-	worker.addEventListener('message', function (event) {
-		var data = event.data, descriptor = '#' + data.index + ': ' + data.original;
-
-		switch (data.type) {
-			// got debug message from worker
-			case 'debug':
-				Function.prototype.apply.call(console[data.action], console, data.args);
-				return;
-
-			// got new converted MP4 video data
-			case 'video':
-				var video = document.createElement('video'), source = document.createElement('source');
-				source.type = 'video/mp4';
-				video.appendChild(source);
-
-				video.addEventListener('loadedmetadata', function () {
-					if (canvas.width !== this.videoWidth || canvas.height !== this.videoHeight) {
-						canvas.width = this.width = this.videoWidth;
-						canvas.height = this.height = this.videoHeight;
-					}
-				});
-
-				video.addEventListener('play', function () {
-					if (currentVideo !== this) {
-						if (!currentVideo) {
-							// UI initialization magic to be left in main HTML for unobtrusiveness
-							new Function(script.text).call({
-								worker: worker,
-								canvas: canvas,
-								get currentVideo() { return currentVideo }
-							});
+	
+	var pesStream = new jBinary(stream.slice(0, stream.tell()), PES),
+		audioStream = new jBinary(stream.byteLength, ADTS),
+		samples = [],
+		audioSamples = [];
+	
+	stream = new jDataView(stream.byteLength);
+	
+	while (pesStream.tell() < pesStream.view.byteLength) {
+		var packet = pesStream.read('PESPacket');
+		
+		if (packet.streamId === 0xC0) {
+			// 0xC0 means we have got first audio stream
+			audioStream.write('blob', packet.data);
+		} else
+		if (packet.streamId === 0xE0) {
+			var nalStream = new jBinary(packet.data, H264),
+				curSample = {offset: stream.tell(), pts: packet.pts, dts: packet.dts || packet.pts};
+			
+			samples.push(curSample);
+			
+			// collecting info from H.264 NAL units
+			while (nalStream.tell() < nalStream.view.byteLength) {
+				var nalUnit = nalStream.read('NALUnit');
+				switch (nalUnit[0] & 0x1F) {
+					case 7:
+						if (!sps) {
+							var sps = nalUnit;
+							var spsInfo = new jBinary(sps, H264).read('SPS');
+							var width = (spsInfo.pic_width_in_mbs_minus_1 + 1) * 16;
+							var height = (2 - spsInfo.frame_mbs_only_flag) * (spsInfo.pic_height_in_map_units_minus_1 + 1) * 16;
+							var cropping = spsInfo.frame_cropping;
+							if (cropping) {
+								width -= 2 * (cropping.left + cropping.right);
+								height -= 2 * (cropping.top + cropping.bottom);
+							}
 						}
-						console.log('playing ' + descriptor);
-						currentVideo = this;
-						nextIndex++;
-						if (sentVideos - nextIndex <= 1) {
-							getMore();
-						}
-					}
-					nextFrame();
-				});
+						break;
 
-				video.addEventListener('ended', function () {
-					delete videos[nextIndex - 1];
-					if (nextIndex in videos) {
-						videos[nextIndex].play();
-					}
-				});
-				if (video.src.slice(0, 5) === 'blob:') {
-					video.addEventListener('ended', function () {
-						URL.revokeObjectURL(this.src);
-					});
+					case 8:
+						if (!pps) {
+							var pps = nalUnit;
+						}
+						break;
+
+					case 5:
+						curSample.isIDR = true;
+					/* falls through */
+					default:
+						stream.writeUint32(nalUnit.length);
+						stream.writeBytes(nalUnit);
 				}
-
-				video.src = source.src = data.url;
-				video.load();
-
-				(function canplaythrough() {
-					console.log('converted ' + descriptor);
-					videos[data.index] = this;
-					if ((!currentVideo || currentVideo.ended) && data.index === nextIndex) {
-						this.play();
-					}
-				}).call(video);
-
-				return;
+			}
 		}
-	});
+	}
+	
+	samples.push({offset: stream.tell()});
 
-	// relative URL resolver
-	var resolveURL = (function () {
-		var doc = document,
-			old_base = doc.getElementsByTagName('base')[0],
-			old_href = old_base && old_base.href,
-			doc_head = doc.head || doc.getElementsByTagName('head')[0],
-			our_base = old_base || doc.createElement('base'),
-			resolver = doc.createElement('a'),
-			resolved_url;
-
-		return function (base_url, url) {
-			old_base || doc_head.appendChild(our_base);
-
-			our_base.href = base_url;
-			resolver.href = url;
-			resolved_url  = resolver.href; // browser magic at work here
-
-			old_base ? old_base.href = old_href : doc_head.removeChild(our_base);
-
-			return resolved_url;
-		};
-	})();
-
-	// loading more videos from manifest
-	function getMore() {
-		var ajax = new XMLHttpRequest();
-		ajax.addEventListener('load', function () {
-			var originals =
-				this.responseText
-				.split(/\r?\n/)
-				.filter(RegExp.prototype.test.bind(/\.ts$/))
-				.map(resolveURL.bind(null, manifest));
-
-			originals = originals.slice(originals.lastIndexOf(lastOriginal) + 1);
-			lastOriginal = originals[originals.length - 1];
-
-			worker.postMessage(originals.map(function (url, index) {
-				return {url: url, index: sentVideos + index};
-			}));
-
-			sentVideos += originals.length;
-
-			console.log('asked for ' + originals.length + ' more videos');
+	var sizes = [],
+		dtsDiffs = [],
+		accessIndexes = [],
+		pts_dts_Diffs = [],
+		current = samples[0],
+		frameRate = {sum: 0, count: 0},
+		duration = 0;
+	
+	// calculating PTS/DTS differences and collecting keyframes
+	
+	for (var i = 0, length = samples.length - 1; i < length; i++) {
+		var next = samples[i + 1];
+		sizes.push(next.offset - current.offset);
+		var dtsDiff = next.dts - current.dts;
+		if (dtsDiff) {
+			dtsDiffs.push({sample_count: 1, sample_delta: dtsDiff});
+			duration += dtsDiff;
+			frameRate.sum += dtsDiff;
+			frameRate.count++;
+		} else {
+			dtsDiffs.length++;
+		}
+		if (current.isIDR) {
+			accessIndexes.push(i + 1);
+		}
+		pts_dts_Diffs.push({
+			first_chunk: pts_dts_Diffs.length + 1,
+			sample_count: 1,
+			sample_offset: current.dtsFix = current.pts - current.dts
 		});
-		ajax.open('GET', manifest, true);
-		ajax.send();
+		current = next;
+	}
+	
+	frameRate = frameRate.sum / frameRate.count;
+	
+	for (var i = 0, length = dtsDiffs.length; i < length; i++) {
+		if (dtsDiffs[i] === undefined) {
+			dtsDiffs[i] = {first_chunk: i + 1, sample_count: 1, sample_delta: frameRate};
+			duration += frameRate;
+			//samples[i + 1].dts = samples[i].dts + frameRate;
+		}
+	}
+	
+	// checking if DTS differences are same everywhere to pack them into one item
+	
+	var dtsDiffsSame = true;
+	
+	for (var i = 1, length = dtsDiffs.length; i < length; i++) {
+		if (dtsDiffs[i].sample_delta !== dtsDiffs[0].sample_delta) {
+			dtsDiffsSame = false;
+			break;
+		}
+	}
+	
+	if (dtsDiffsSame) {
+		dtsDiffs = [{first_chunk: 1, sample_count: sizes.length, sample_delta: dtsDiffs[0].sample_delta}];
 	}
 
-	getMore();
-})();
+	// building audio metadata
+
+	var audioStart = stream.tell(),
+		audioSize = audioStream.tell(),
+		audioSizes = [],
+		audioHeader,
+		maxAudioSize = 0;
+		
+	audioStream.seek(0);
+	
+	while (audioStream.tell() < audioSize) {
+		audioHeader = audioStream.read('ADTSPacket');
+		audioSizes.push(audioHeader.data.length);
+		if (audioHeader.data.length > maxAudioSize) {
+			maxAudioSize = audioHeader.data.length;
+		}
+		stream.writeBytes(audioHeader.data);
+	}
+
+	// generating resulting MP4
+
+	var file = new jBinary(stream.byteLength, MP4);
+	
+	var trak = [{
+		atoms: {
+			tkhd: [{
+				version: 0,
+				flags: 15,
+				track_ID: 1,
+				duration: duration,
+				layer: 0,
+				alternate_group: 0,
+				volume: 1,
+				matrix: {
+					a: 1, b: 0, x: 0,
+					c: 0, d: 1, y: 0,
+					u: 0, v: 0, w: 1
+				},
+				dimensions: {
+					horz: width,
+					vert: height
+				}
+			}],
+			mdia: [{
+				atoms: {
+					mdhd: [{
+						version: 0,
+						flags: 0,
+						timescale: 90000,
+						duration: duration,
+						lang: 'und'
+					}],
+					hdlr: [{
+						version: 0,
+						flags: 0,
+						handler_type: 'vide',
+						name: 'VideoHandler'
+					}],
+					minf: [{
+						atoms: {
+							vmhd: [{
+								version: 0,
+								flags: 1,
+								graphicsmode: 0,
+								opcolor: {r: 0, g: 0, b: 0}
+							}],
+							dinf: [{
+								atoms: {
+									dref: [{
+										version: 0,
+										flags: 0,
+										entries: [{
+											type: 'url ',
+											version: 0,
+											flags: 1,
+											location: ''
+										}]
+									}]
+								}
+							}],
+							stbl: [{
+								atoms: {
+									stsd: [{
+										version: 0,
+										flags: 0,
+										entries: [{
+											type: 'avc1',
+											data_reference_index: 1,
+											dimensions: {
+												horz: width,
+												vert: height
+											},
+											resolution: {
+												horz: 72,
+												vert: 72
+											},
+											frame_count: 1,
+											compressorname: '',
+											depth: 24,
+											atoms: {
+												avcC: [{
+													version: 1,
+													profileIndication: spsInfo.profile_idc,
+													profileCompatibility: parseInt(spsInfo.constraint_set_flags.join(''), 2),
+													levelIndication: spsInfo.level_idc,
+													lengthSizeMinusOne: 3,
+													seqParamSets: [sps],
+													pictParamSets: [pps]
+												}]
+											}
+										}]
+									}],
+									stts: [{
+										version: 0,
+										flags: 0,
+										entries: dtsDiffs
+									}],
+									stss: [{
+										version: 0,
+										flags: 0,
+										entries: accessIndexes
+									}],
+									ctts: [{
+										version: 0,
+										flags: 0,
+										entries: pts_dts_Diffs
+									}],
+									stsc: [{
+										version: 0,
+										flags: 0,
+										entries: [{
+											first_chunk: 1,
+											samples_per_chunk: sizes.length,
+											sample_description_index: 1
+										}]
+									}],
+									stsz: [{
+										version: 0,
+										flags: 0,
+										sample_size: 0,
+										sample_count: sizes.length,
+										sample_sizes: sizes
+									}],
+									stco: [{
+										version: 0,
+										flags: 0,
+										entries: [0x28]
+									}]
+								}
+							}]
+						}
+					}]
+				}
+			}]
+		}
+	}];
+
+	if (audioSize > 0) {
+		trak.push({
+			atoms: {
+				tkhd: [{
+					version: 0,
+					flags: 15,
+					track_ID: 2,
+					duration: duration,
+					layer: 0,
+					alternate_group: 1,
+					volume: 1,
+					matrix: {
+						a: 1, b: 0, x: 0,
+						c: 0, d: 1, y: 0,
+						u: 0, v: 0, w: 1
+					},
+					dimensions: {
+						horz: 0,
+						vert: 0
+					}
+				}],
+				mdia: [{
+					atoms: {
+						mdhd: [{
+							version: 0,
+							flags: 0,
+							timescale: 90000,
+							duration: duration,
+							lang: 'eng'
+						}],
+						hdlr: [{
+							version: 0,
+							flags: 0,
+							handler_type: 'soun',
+							name: 'SoundHandler'
+						}],
+						minf: [{
+							atoms: {
+								smhd: [{
+									version: 0,
+									flags: 0,
+									balance: 0
+								}],
+								dinf: [{
+									atoms: {
+										dref: [{
+											version: 0,
+											flags: 0,
+											entries: [{
+												type: 'url ',
+												version: 0,
+												flags: 1,
+												location: ''
+											}]
+										}]
+									}
+								}],
+								stbl: [{
+									atoms: {
+										stsd: [{
+											version: 0,
+											flags: 0,
+											entries: [{
+												type: 'mp4a',
+												data_reference_index: 1,
+												channelcount: 2,
+												samplesize: 16,
+												samplerate: 22050,
+												atoms: {
+													esds: [{
+														version: 0,
+														flags: 0,
+														sections: [
+															{
+																descriptor_type: 3,
+																ext_type: 128,
+																length: 34,
+																es_id: 2,
+																stream_priority: 0
+															},
+															{
+																descriptor_type: 4,
+																ext_type: 128,
+																length: 20,
+																type: 'mpeg4_audio',
+																stream_type: 'audio',
+																upstream_flag: 0,
+																buffer_size: 0,
+																maxBitrate: maxAudioSize / (duration / 90000 / audioSizes.length),
+																avgBitrate: (stream.tell() - audioStart) / (duration / 90000)
+															},
+															{
+																descriptor_type: 5,
+																ext_type: 128,
+																length: 2,
+																audio_profile: audioHeader.profileMinusOne + 1,
+																sampling_freq: audioHeader.samplingFreq,
+																channelConfig: audioHeader.channelConfig
+															},
+															{
+																descriptor_type: 6,
+																ext_type: 128,
+																length: 1,
+																sl: 2
+															}
+														]
+													}]
+												}
+											}]
+										}],
+										stts: [{
+											version: 0,
+											flags: 0,
+											entries: [{
+												sample_count: audioSizes.length,
+												sample_delta: duration / audioSizes.length
+											}]
+										}],
+										stsc: [{
+											version: 0,
+											flags: 0,
+											entries: [{
+												first_chunk: 1,
+												samples_per_chunk: audioSizes.length,
+												sample_description_index: 1
+											}]
+										}],
+										stsz: [{
+											version: 0,
+											flags: 0,
+											sample_size: 0,
+											sample_count: audioSizes.length,
+											sample_sizes: audioSizes
+										}],
+										stco: [{
+											version: 0,
+											flags: 0,
+											entries: [0x28 + audioStart]
+										}]
+									}
+								}]
+							}
+						}]
+					}
+				}]
+			}
+		});
+	};
+	
+	file.write('File', {
+		ftyp: [{
+			major_brand: 'isom',
+			minor_version: 512,
+			compatible_brands: ['isom', 'iso2', 'avc1', 'mp41']
+		}],
+		mdat: [{
+			_rawData: stream.getBytes(stream.tell(), 0)
+		}],
+		moov: [{
+			atoms: {
+				mvhd: [{
+					version: 0,
+					flags: 0,
+					timescale: 90000,
+					duration: duration,
+					rate: 1,
+					volume: 1,
+					matrix: {
+						a: 1, b: 0, x: 0,
+						c: 0, d: 1, y: 0,
+						u: 0, v: 0, w: 1
+					},
+					next_track_ID: 2
+				}],
+				trak: trak
+			}
+		}]
+	});
+	
+	console.timeEnd('convert');
+
+	file.saveAs('sample.mp4');
+});
