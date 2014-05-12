@@ -4,10 +4,13 @@ Error.stackTraceLimit = Infinity;
 
 var prevPrepareStackTrace = Error.prepareStackTrace;
 Error.prepareStackTrace = function (error, frames) {
-	var firstNonNamedIndex = 0;
+	var firstNamedIndex = 0, firstNonNamedIndex = 0;
 
 	var filteredFrames = frames.filter(function (frame, index) {
 		if ('displayName' in frame.getFunction()) {
+			if (!firstNamedIndex) {
+				firstNamedIndex = index;
+			}
 			firstNonNamedIndex = index + 1;
 			return true;
 		} else {
@@ -15,7 +18,7 @@ Error.prepareStackTrace = function (error, frames) {
 		}
 	});
 
-	return prevPrepareStackTrace(error, filteredFrames.concat(frames.slice(firstNonNamedIndex)));
+	return prevPrepareStackTrace(error, frames.slice(0, firstNamedIndex).concat(filteredFrames).concat(frames.slice(firstNonNamedIndex)));
 };
 
 var jBinary = require('jbinary');
