@@ -62,7 +62,7 @@ module.exports = {
 	},
 
 	ES: {
-		_rawStream: ['blob', function () { return 188 - (this.binary.tell() % 188) }]
+		_rawStream: ['blob', function () { return this.binary.getContext(1)._endof - this.binary.tell() }]
 	},
 
 	PATItem: ['array', {
@@ -157,6 +157,7 @@ module.exports = {
 
 	Packet: {
 		_startof: function () { return this.binary.tell() },
+		_endof: function (context) { return context._startof + 188 },
 
 		_syncByte: ['const', 'uint8', 0x47, true],
 
@@ -184,7 +185,7 @@ module.exports = {
 			}
 		})],
 
-		_toEnd: function (context) { this.binary.seek(context._startof + 188) }
+		_toEnd: function (context) { this.binary.seek(context._endof) }
 	},
 
 	File: jBinary.Template({
